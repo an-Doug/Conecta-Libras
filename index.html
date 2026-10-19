@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#173f83">
+  <title>Conecta Libras</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;800&family=Fraunces:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="phone">
+
+  <!-- INÍCIO -->
+  <section id="home" class="screen">
+    <header class="row between mb">
+      <span class="brand small">Conecta Libras</span>
+      <span class="pill">● Sem cadastro</span>
+    </header>
+    <div class="hero" aria-hidden="true"><div class="bubble one">✋</div><div class="bubble two">💬</div></div>
+    <p class="eyebrow green">Um jeito mais próximo de conversar</p>
+    <h1 class="brand">Conecta Libras</h1>
+    <p class="lead">Converse do seu jeito.</p>
+    <p class="muted mb">Escolha como começar. Você pode trocar de modo a qualquer momento, sem cadastro.</p>
+    <div class="stack push">
+      <button id="start-speech" class="btn primary big">🎤 Falar com avatar</button>
+      <button id="start-camera" class="btn secondary big">📷 Usar câmera</button>
+      <button id="open-help" class="link">Como funciona</button>
+      <button id="install" class="link" hidden>Instalar o app</button>
+    </div>
+  </section>
+
+  <!-- CONVERSA -->
+  <section id="conversation" class="screen" hidden>
+    <header class="row between mb">
+      <button id="back-home" class="btn outline icon-btn" aria-label="Voltar">←</button>
+      <h1 class="brand">Conecta Libras</h1>
+      <button id="new-conversation" class="link inline" aria-label="Nova conversa">Nova conversa</button>
+    </header>
+
+    <nav class="tabs" aria-label="Modo">
+      <button id="tab-speech" class="tab active" aria-pressed="true">Fala → Libras</button>
+      <button id="tab-camera" class="tab" aria-pressed="false">Libras → Texto</button>
+    </nav>
+
+    <!-- Modo fala -->
+    <div id="speech-mode">
+      <div id="avatar-stage" class="stage">
+        <div id="avatar-placeholder" class="placeholder">
+          <div class="spinner" id="avatar-spinner"></div>
+          <p id="avatar-msg">O avatar aparece aqui quando você falar ou digitar.</p>
+        </div>
+        <!-- Widget oficial VLibras (avatar 3D do governo federal) é montado aqui -->
+        <div id="vw-host"></div>
+      </div>
+
+      <div class="panel">
+        <p id="speech-status" class="status"><span class="dot"></span><span id="speech-status-text">Pronto para ouvir</span></p>
+        <p id="speech-text" class="transcript muted">Toque no microfone e fale. A transcrição aparece aqui.</p>
+      </div>
+
+      <button id="mic-button" class="btn primary big" aria-pressed="false">
+        <span id="mic-label">🎤 Começar a falar</span>
+      </button>
+
+      <form id="type-form" class="row gap mt" autocomplete="off">
+        <input id="type-input" type="text" placeholder="Ou digite aqui…" aria-label="Digitar mensagem" enterkeyhint="send">
+        <button class="btn secondary" type="submit">Enviar</button>
+      </form>
+
+      <div class="grid2 mt">
+        <button id="speech-repeat" class="btn outline">Repetir</button>
+        <button id="speech-clear" class="btn outline">Limpar</button>
+      </div>
+      <button id="switch-camera" class="link">Trocar para câmera →</button>
+    </div>
+
+    <!-- Modo câmera -->
+    <div id="camera-mode" hidden>
+      <div class="stage camera-stage">
+        <video id="video" playsinline muted></video>
+        <canvas id="overlay"></canvas>
+        <div class="frame" aria-hidden="true"></div>
+        <p id="camera-hint" class="camera-hint">Toque em “Iniciar câmera” e posicione as mãos dentro da área.</p>
+      </div>
+
+      <div class="panel">
+        <p id="camera-status" class="status"><span class="dot"></span><span id="camera-status-text">Câmera desligada</span></p>
+        <p id="camera-text" class="transcript muted">As palavras reconhecidas aparecem aqui.</p>
+      </div>
+
+      <button id="camera-toggle" class="btn primary big">📷 Iniciar câmera</button>
+
+      <div class="grid3 mt">
+        <button id="camera-speak" class="btn outline" aria-label="Falar o texto em voz alta">🔊 Falar</button>
+        <button id="camera-undo" class="btn outline">Apagar</button>
+        <button id="camera-clear" class="btn outline">Limpar</button>
+      </div>
+
+      <details class="panel mt" id="teach">
+        <summary>Ensinar um sinal ao app</summary>
+        <p class="muted small">O app reconhece sinais que você ensinar (formas de mão). Digite a palavra, faça o sinal diante da câmera e toque em gravar.</p>
+        <div class="row gap">
+          <input id="teach-label" type="text" placeholder="Palavra (ex.: oi)" aria-label="Palavra do sinal">
+          <button id="teach-record" class="btn secondary">Gravar</button>
+        </div>
+        <p id="teach-msg" class="muted small" aria-live="polite"></p>
+        <ul id="teach-list" class="chips"></ul>
+      </details>
+
+      <button id="switch-speech" class="link">Trocar para avatar →</button>
+    </div>
+
+    <aside class="mt2" aria-labelledby="history-title">
+      <h2 id="history-title">Conversa recente</h2>
+      <p id="history-empty" class="muted small">As mensagens aparecerão aqui.</p>
+      <div id="history-list" aria-live="polite"></div>
+    </aside>
+  </section>
+
+  <!-- AJUDA -->
+  <section id="help" class="screen" hidden>
+    <header class="row gap mb">
+      <button id="back-help" class="btn outline icon-btn" aria-label="Voltar">←</button>
+      <span class="brand small">Conecta Libras</span>
+    </header>
+    <p class="eyebrow green">Simples de começar</p>
+    <h1 class="brand">Como funciona</h1>
+    <p class="muted mb">Uma conversa nos dois sentidos.</p>
+    <article class="panel step"><div class="step-icon">🎤</div><div><h2>1. Fale ou digite</h2><p class="muted">O avatar de Libras interpreta o que foi dito.</p></div></article>
+    <article class="panel step"><div class="step-icon">📷</div><div><h2>2. Sinalize</h2><p class="muted">A câmera reconhece os sinais ensinados e escreve (e fala) o texto.</p></div></article>
+    <article class="panel step"><div class="step-icon">🔁</div><div><h2>3. Alterne</h2><p class="muted">Troque de modo a qualquer momento durante a conversa.</p></div></article>
+    <p class="muted small mt">O vídeo da câmera é processado no próprio aparelho e não é enviado a servidores. O reconhecimento de voz do navegador pode usar o serviço do fabricante do navegador.</p>
+    <button id="help-start" class="btn primary big push">Começar agora</button>
+  </section>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
