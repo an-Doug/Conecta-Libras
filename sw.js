@@ -1,5 +1,5 @@
-const CACHE = "conecta-libras-v1";
-const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icon.svg"];
+const CACHE = "conecta-libras-v2";
+const SHELL = ["./", "index.html", "style.css", "app.js", "avatar.js", "rig.js", "signs.js", "manifest.webmanifest", "icon.svg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
@@ -11,7 +11,7 @@ self.addEventListener("activate", (e) => {
 });
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
-  if (e.request.method !== "GET" || url.origin !== location.origin) return; // CDNs/VLibras sempre da rede
+  if (e.request.method !== "GET" || url.origin !== location.origin) return; // CDNs sempre da rede
   e.respondWith(
     fetch(e.request).then((r) => { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); return r; })
       .catch(() => caches.match(e.request))

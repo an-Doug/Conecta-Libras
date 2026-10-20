@@ -6,6 +6,21 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 
+/* ---------- Estilos extras (histórico) ---------- */
+const extraCss = document.createElement("style");
+extraCss.textContent = `
+.hist-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.hist-head h2{margin:0}
+.hist-head .link{width:auto;margin:0;font-size:14px;min-height:32px}
+.hist-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:2px}
+.hist-top small{margin:0}
+.hist-replay{min-height:32px;padding:0 12px;border-radius:99px;background:var(--soft);color:var(--blue);font-weight:700;font-size:13px}
+.diag-bar{height:10px;background:#e1e7f0;border-radius:99px;overflow:hidden}
+.diag-bar i{display:block;height:100%;width:0;background:var(--green)}
+.diag-log{font:12px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap;background:#f1f4f9;border-radius:12px;padding:8px;max-height:200px;overflow:auto;margin:8px 0 0;color:var(--ink)}
+`;
+document.head.appendChild(extraCss);
+
 /* ---------- Navegação ---------- */
 let previous = "home", screen = "home", mode = "speech";
 function toast(msg) {
@@ -39,70 +54,127 @@ $("back-home").onclick = () => { stopListening(); stopCamera(); showScreen("home
 $("tab-speech").onclick = $("switch-speech").onclick = () => setMode("speech");
 $("tab-camera").onclick = $("switch-camera").onclick = () => setMode("camera");
 
-/* ---------- Histórico ---------- */
+/* ---------- Histórico (persistente neste aparelho) ---------- */
+const HISTORY_KEY = "libras-history", HISTORY_MAX = 50;
+let history = store.get(HISTORY_KEY, []); // [{kind, text, t}]
+if (!Array.isArray(history)) history = [];
+
+function timeLabel(t) {
+  try { return new Date(t).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }); } catch { return ""; }
+}
+function renderHistory() {
+  const list = $("history-list");
+  list.replaceChildren();
+  $("history-empty").hidden = history.length > 0;
+  $("history-clear").hidden = history.length === 0;
+  for (const item of history) {
+    const card = document.createElement("article");
+    card.className = "hist" + (item.kind === "camera" ? " camera" : "");
+    const top = document.createElement("div"); top.className = "hist-top";
+    const label = document.createElement("small");
+    label.textContent = (item.kind === "camera" ? "Libras → texto" : "Fala → Libras") + " · " + timeLabel(item.t);
+    top.append(label);
+    if (item.kind !== "camera") {
+      const b = document.createElement("button");
+      b.className = "hist-replay"; b.type = "button"; b.textContent = "▶ Ver de novo";
+      b.setAttribute("aria-label", "Ver de novo em Libras: " + item.text);
+      b.onclick = () => { setMode("speech"); showTranscript(item.text); translate(item.text); };
+      top.append(b);
+    }
+    const body = document.createElement("p"); body.textContent = item.text;
+    card.append(top, body);
+    list.append(card);
+  }
+}
 function addHistory(kind, text) {
   if (!text) return;
-  $("history-empty").hidden = true;
-  const card = document.createElement("article");
-  card.className = "hist" + (kind === "camera" ? " camera" : "");
-  const label = document.createElement("small");
-  label.textContent = kind === "camera" ? "Libras → texto" : "Fala → Libras";
-  const body = document.createElement("p"); body.textContent = text;
-  card.append(label, body);
-  $("history-list").prepend(card);
+  history.unshift({ kind, text, t: Date.now() });
+  if (history.length > HISTORY_MAX) history.length = HISTORY_MAX;
+  store.set(HISTORY_KEY, history);
+  renderHistory();
 }
+function clearHistory() {
+  history = []; store.set(HISTORY_KEY, history); renderHistory();
+}
+// botão "Limpar histórico" criado aqui para não depender de mudança no HTML
+(function setupHistoryHeader() {
+  const title = $("history-title");
+  const head = document.createElement("div"); head.className = "hist-head";
+  title.replaceWith(head); head.append(title);
+  const btn = document.createElement("button");
+  btn.id = "history-clear"; btn.type = "button"; btn.className = "link"; btn.textContent = "Limpar histórico";
+  btn.onclick = () => { clearHistory(); toast("Histórico apagado."); };
+  head.append(btn);
+})();
+
 $("new-conversation").onclick = () => {
-  stopListening(); stopCamera(); clearSpeech(); clearCamera();
-  $("history-list").replaceChildren(); $("history-empty").hidden = false;
+  stopListening(); stopCamera(); clearSpeech(); clearCamera(); clearHistory();
   toast("Nova conversa iniciada.");
 };
 
 /* =========================================================
-   FALA → LIBRAS  (Web Speech API + avatar 3D VLibras)
+   FALA → LIBRAS  (Web Speech API + avatar 3D próprio com Three.js)
    ========================================================= */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null, listening = false, lastSent = "";
+let rec = null, listening = false, lastSent = "", handled = 0;
 
-function setSpeechStatus(text, live) {
+function refreshSpeechStatus() {
+  let text = "Pronto para ouvir", live = false;
+  if (pending > 0) { text = "Avatar sinalizando…"; live = true; }
+  else if (listening) { text = "Ouvindo…"; live = true; }
   $("speech-status-text").textContent = text;
-  $("speech-status").classList.toggle("live", !!live);
+  $("speech-status").classList.toggle("live", live);
 }
 function showTranscript(text) {
   const el = $("speech-text");
   el.textContent = text || "Toque no microfone e fale. A transcrição aparece aqui.";
   el.classList.toggle("muted", !text); el.classList.toggle("has", !!text);
 }
-function startListening() {
+let netRetried = false;
+function startListening(continuous = true) {
   if (!SR) { toast("Reconhecimento de voz indisponível neste navegador. Use o campo de texto (ou Chrome/Edge/Safari)."); $("type-input").focus(); return; }
+  if (continuous) netRetried = false;
   ensureAvatar();
+  try { rec && (rec.onend = null, rec.onerror = null, rec.abort()); } catch {}
   rec = new SR();
-  rec.lang = "pt-BR"; rec.interimResults = true; rec.continuous = true;
+  rec.lang = "pt-BR"; rec.interimResults = true; rec.continuous = continuous;
+  rec.onstart = () => { handled = 0; };
   rec.onresult = (e) => {
-    let interim = "", final = "";
+    let interim = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) final += t; else interim += t;
+      const r = e.results[i], t = r[0].transcript;
+      if (r.isFinal) {
+        // evita reenviar resultados finais repetidos (comportamento do Chrome/Android)
+        if (i >= handled) { handled = i + 1; const phrase = t.trim(); if (phrase) { showTranscript(phrase); sendToAvatar(phrase); } }
+      } else interim += t;
     }
-    showTranscript((final || interim).trim());
-    if (final.trim()) sendToAvatar(final.trim());
+    if (interim.trim()) showTranscript(interim.trim());
   };
   rec.onerror = (e) => {
     if (e.error === "not-allowed" || e.error === "service-not-allowed") { toast("Permita o uso do microfone para falar."); stopListening(); }
+    else if (e.error === "network") {
+      // o reconhecimento de voz do navegador depende de um serviço online do fabricante
+      if (!netRetried) { netRetried = true; setTimeout(() => startListening(false), 500); return; }
+      stopListening();
+      toast("O reconhecimento de voz não conseguiu se conectar. Tente o Chrome ou Edge (sem VPN/bloqueadores) ou use o campo de texto.");
+      $("type-input").focus();
+    }
+    else if (e.error === "audio-capture") { toast("Nenhum microfone encontrado."); stopListening(); }
     else if (e.error !== "no-speech" && e.error !== "aborted") toast("Erro no microfone: " + e.error);
   };
-  rec.onend = () => { if (listening) { try { rec.start(); } catch {} } };
-  try { rec.start(); } catch {}
+  rec.onend = () => { if (listening) setTimeout(() => { if (listening) { try { rec.start(); } catch {} } }, 250); };
   listening = true;
+  try { rec.start(); } catch {}
   $("mic-label").textContent = "⏹ Parar de ouvir";
   $("mic-button").classList.add("live"); $("mic-button").setAttribute("aria-pressed", "true");
-  setSpeechStatus("Ouvindo…", true);
+  refreshSpeechStatus();
 }
 function stopListening() {
   listening = false;
   try { rec && rec.stop(); } catch {}
   $("mic-label").textContent = "🎤 Começar a falar";
   $("mic-button").classList.remove("live"); $("mic-button").setAttribute("aria-pressed", "false");
-  setSpeechStatus("Pronto para ouvir", false);
+  refreshSpeechStatus();
 }
 $("mic-button").onclick = () => (listening ? stopListening() : startListening());
 
@@ -110,61 +182,73 @@ $("type-form").onsubmit = (e) => {
   e.preventDefault();
   const v = $("type-input").value.trim();
   if (!v) return;
-  $("type-input").value = ""; showTranscript(v); ensureAvatar(); sendToAvatar(v);
+  $("type-input").value = ""; showTranscript(v); sendToAvatar(v);
 };
-$("speech-repeat").onclick = () => (lastSent ? (ensureAvatar(), translate(lastSent)) : toast("Nada para repetir ainda."));
-function clearSpeech() { showTranscript(""); lastSent = ""; try { window.plugin?.player?.stop?.(); } catch {} }
+$("speech-repeat").onclick = () => (lastSent ? translate(lastSent) : toast("Nada para repetir ainda."));
+function clearSpeech() {
+  showTranscript(""); lastSent = "";
+  gen++; chain = Promise.resolve(); pending = 0; playing = false;
+  try { avatar?.stop(); } catch {}
+  showCaption("");
+  refreshSpeechStatus();
+}
 $("speech-clear").onclick = () => { clearSpeech(); toast("Limpo."); };
 
-/* --- Avatar 3D: widget oficial VLibras (https://vlibras.gov.br) --- */
-let avatarState = "idle"; // idle | loading | ready | error
-let avatarPromise = null;
+/* --- Avatar 3D próprio (Three.js, carregado sob demanda) --- */
+const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+let avatarPromise = null, avatar = null, gen = 0, chain = Promise.resolve(), pending = 0, playing = false, captionEl = null;
 function setAvatarMsg(msg, loading) {
   $("avatar-msg").textContent = msg;
   $("avatar-placeholder").classList.toggle("loading", !!loading);
 }
+function showCaption(text) {
+  if (!captionEl) return;
+  captionEl.textContent = text || "";
+  captionEl.hidden = !text;
+}
 function ensureAvatar() {
   if (avatarPromise) return avatarPromise;
-  avatarState = "loading"; setAvatarMsg("Carregando o avatar de Libras…", true);
-  avatarPromise = new Promise((resolve) => {
-    $("vw-host").innerHTML =
-      '<div vw class="enabled"><div vw-access-button class="active"></div>' +
-      '<div vw-plugin-wrapper><div class="vw-plugin-top-wrapper"></div></div></div>';
-    const s = document.createElement("script");
-    s.src = "https://vlibras.gov.br/app/vlibras-plugin.js";
-    s.onload = () => {
-      try { new window.VLibras.Widget("https://vlibras.gov.br/app"); } catch {}
-      // abre o painel do avatar e espera o player ficar disponível
-      let tries = 0;
-      const iv = setInterval(() => {
-        tries++;
-        const btn = document.querySelector("[vw-access-button]");
-        if (btn && !document.querySelector("[vw-plugin-wrapper].active")) btn.click();
-        if (window.plugin?.player) {
-          clearInterval(iv); avatarState = "ready";
-          setAvatarMsg("Avatar pronto. Fale ou digite uma mensagem.", false);
-          $("avatar-placeholder").hidden = true; resolve(true);
-        } else if (tries > 60) {
-          clearInterval(iv); avatarState = "error"; avatarPromise = null;
-          setAvatarMsg("Não foi possível carregar o avatar. Verifique a internet e tente de novo.", false);
-          resolve(false);
-        }
-      }, 500);
-    };
-    s.onerror = () => { avatarState = "error"; avatarPromise = null; setAvatarMsg("Sem conexão com o serviço VLibras.", false); resolve(false); };
-    document.body.appendChild(s);
-  });
+  setAvatarMsg("Carregando o avatar de Libras…", true);
+  avatarPromise = (async () => {
+    let host = null;
+    try {
+      const [THREE, mod] = await Promise.all([import(THREE_URL), import("./avatar.js")]);
+      host = document.createElement("div");
+      host.id = "avatar-3d"; host.style.cssText = "position:absolute;inset:0";
+      $("avatar-stage").prepend(host);
+      avatar = mod.createAvatar(THREE, host);
+      captionEl = document.createElement("p");
+      captionEl.className = "camera-hint"; captionEl.hidden = true; captionEl.setAttribute("aria-hidden", "true");
+      $("avatar-stage").append(captionEl);
+      $("avatar-placeholder").hidden = true;
+      return true;
+    } catch (err) {
+      console.error(err);
+      host?.remove(); avatar = null; avatarPromise = null;
+      setAvatarMsg("Não foi possível iniciar o avatar 3D. Verifique a internet e se o navegador permite gráficos 3D (WebGL).", false);
+      return false;
+    }
+  })();
   return avatarPromise;
 }
-async function sendToAvatar(text) {
-  lastSent = text; addHistory("speech", text);
-  await translate(text);
-}
+
+/* Fila de frases: cada frase só começa quando a anterior termina */
+function setPending(n) { pending = Math.max(0, n); playing = pending > 0; refreshSpeechStatus(); }
 async function translate(text) {
   const ok = await ensureAvatar();
   if (!ok) { toast("Avatar indisponível no momento."); return; }
-  try { window.plugin.player.translate(text); setSpeechStatus("Avatar sinalizando…", listening); }
-  catch { toast("Não foi possível enviar o texto ao avatar."); }
+  lastSent = text;
+  const g = gen;
+  setPending(pending + 1);
+  chain = chain.then(async () => {
+    try { if (g === gen) await avatar.speak(text, { onWord: showCaption }); }
+    catch (err) { console.error(err); }
+    if (g === gen) setPending(pending - 1);
+  });
+}
+function sendToAvatar(text) {
+  addHistory("speech", text);
+  return translate(text);
 }
 
 /* =========================================================
@@ -337,4 +421,56 @@ window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); defe
 $("install").onclick = async () => { if (!deferredPrompt) return; deferredPrompt.prompt(); await deferredPrompt.userChoice; deferredPrompt = null; $("install").hidden = true; };
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 document.addEventListener("visibilitychange", () => { if (document.hidden) { stopListening(); stopCamera(); } });
+/* ---------- Diagnóstico de voz (ajuda a achar por que o reconhecimento falha) ---------- */
+(function setupDiagnostics() {
+  const d = document.createElement("details"); d.className = "panel mt"; d.id = "diag";
+  d.innerHTML =
+    '<summary>Diagnóstico do microfone</summary>' +
+    '<p class="muted small">Use se a voz não funcionar. Fale normalmente durante os testes. Tudo roda só neste aparelho.</p>' +
+    '<div class="grid2"><button id="diag-mic" class="btn outline" type="button">1. Testar microfone</button>' +
+    '<button id="diag-sr" class="btn outline" type="button">2. Testar reconhecimento</button></div>' +
+    '<div class="diag-bar mt" aria-hidden="true"><i id="diag-level"></i></div><pre id="diag-log" class="diag-log"></pre>';
+  $("switch-camera").before(d);
+  const logEl = $("diag-log");
+  const log = (m) => { logEl.textContent += new Date().toLocaleTimeString("pt-BR") + "  " + m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+  log("Navegador: " + navigator.userAgent);
+  log("Endereço: " + location.origin + " | contexto seguro: " + window.isSecureContext + " | online: " + navigator.onLine);
+  log("Reconhecimento de voz disponível: " + !!SR);
+
+  $("diag-mic").onclick = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) return log("getUserMedia indisponível.");
+    stopListening();
+    log("Teste do microfone: fale por 5 segundos…");
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      log("Microfone em uso: " + (s.getAudioTracks()[0]?.label || "(sem nome)"));
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      const an = ac.createAnalyser(); an.fftSize = 512; ac.createMediaStreamSource(s).connect(an);
+      const buf = new Uint8Array(an.fftSize); let peak = 0; const t0 = performance.now();
+      await new Promise((res) => {
+        (function tick() {
+          an.getByteTimeDomainData(buf);
+          let m = 0; for (const v of buf) m = Math.max(m, Math.abs(v - 128));
+          peak = Math.max(peak, m); $("diag-level").style.width = Math.min(100, (m / 64) * 100) + "%";
+          if (performance.now() - t0 < 5000) requestAnimationFrame(tick); else res();
+        })();
+      });
+      s.getTracks().forEach((t) => t.stop()); ac.close(); $("diag-level").style.width = "0";
+      log(peak > 6 ? `OK: o microfone captou som (pico ${peak}).` : `Quase nenhum som captado (pico ${peak}). Fale mais perto ou confira o microfone padrão do Windows/Chrome.`);
+    } catch (e) { log("Falha ao abrir o microfone: " + e.name); }
+  };
+
+  $("diag-sr").onclick = () => {
+    if (!SR) return log("SpeechRecognition indisponível neste navegador.");
+    stopListening();
+    const r = new SR(); r.lang = "pt-BR"; r.interimResults = true; r.continuous = false;
+    for (const ev of ["start", "audiostart", "soundstart", "speechstart", "speechend", "soundend", "audioend", "nomatch", "end"]) r.addEventListener(ev, () => log("evento: " + ev));
+    r.onresult = (e) => { const x = e.results[e.results.length - 1]; log("texto: " + x[0].transcript + (x.isFinal ? " (final)" : "")); };
+    r.onerror = (e) => log("ERRO: " + e.error + (e.message ? " — " + e.message : ""));
+    log("Teste do reconhecimento: fale uma frase curta agora…");
+    try { r.start(); } catch (e) { log("start falhou: " + e.message); }
+  };
+})();
+
 renderSamples();
+renderHistory();
