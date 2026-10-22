@@ -1,5 +1,3 @@
-import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
-
 const $ = (id) => document.getElementById(id);
 const store = {
   get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
@@ -252,15 +250,18 @@ function sendToAvatar(text) {
 }
 
 /* =========================================================
-   LIBRAS → TEXTO  (câmera + MediaPipe Hands + kNN de sinais)
+   LIBRAS → TEXTO  (câmera + MediaPipe Mãos/Pose + encoder TF.js + kNN de embeddings)
+   Modelo treinado offline (ml/train_libras.py) e servido de models/libras-v1/.
    ========================================================= */
 const video = $("video"), canvas = $("overlay"), ctx = canvas.getContext("2d");
-let stream = null, landmarker = null, running = false, lastTs = -1;
+const MP_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const MODEL_BASE = "models/libras-v1/";
+const USER_REFS_KEY = "libras-user-refs";   // [{label, e:[128]}] — sinais ensinados pelo usuário (só embeddings)
+let stream = null, mp = null, handLm = null, poseLm = null, recognizer = null, segmenter = null, feat = null;
+let running = false, lastTs = -1, frameNo = 0, lastPoseRes = null;
 let words = [];
-let samples = store.get("libras-samples", []); // [{label, v:[126]}]
-const KNN_K = 3, MAX_DIST = 0.9, STABLE_FRAMES = 10, COOLDOWN_MS = 1500;
-let candidate = null, candCount = 0, lastEmit = { label: null, t: 0 }, lastHandSeen = 0;
-let recording = null; // {label, left, vecs}
+let teaching = null; // {label, n, want}
+try { localStorage.removeItem("libras-samples"); } catch {}   // formato antigo (kNN de frames)
 
 function setCamStatus(text, live) {
   $("camera-status-text").textContent = text;
@@ -271,17 +272,30 @@ function showCamText() {
   el.textContent = t || "As palavras reconhecidas aparecem aqui.";
   el.classList.toggle("muted", !t); el.classList.toggle("has", !!t);
 }
-async function getLandmarker() {
-  if (landmarker) return landmarker;
-  const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-  const opts = (delegate) => ({
-    baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate },
-    runningMode: "VIDEO", numHands: 2,
-  });
-  try { landmarker = await HandLandmarker.createFromOptions(fileset, opts("GPU")); }
-  catch { landmarker = await HandLandmarker.createFromOptions(fileset, opts("CPU")); }
-  return landmarker;
+
+/* MediaPipe e TF.js só são baixados quando a câmera é usada; se o CDN falhar, o resto do app segue funcionando */
+async function loadVision() {
+  if (handLm && poseLm) return;
+  mp = mp || (await import(MP_URL));
+  const fileset = await mp.FilesetResolver.forVisionTasks(MP_URL + "/wasm");
+  const make = async (Task, url, extra) => {
+    const opts = (delegate) => ({ baseOptions: { modelAssetPath: url, delegate }, runningMode: "VIDEO", ...extra });
+    try { return await Task.createFromOptions(fileset, opts("GPU")); }
+    catch { return await Task.createFromOptions(fileset, opts("CPU")); }
+  };
+  const G = "https://storage.googleapis.com/mediapipe-models/";
+  handLm = await make(mp.HandLandmarker, G + "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", { numHands: 2 });
+  poseLm = await make(mp.PoseLandmarker, G + "pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task", { numPoses: 1 });
 }
+async function loadModel() {
+  if (recognizer) return;
+  const [rmod, fmod] = await Promise.all([import("./recognizer/recognizer.js"), import("./recognizer/features.js")]);
+  feat = fmod;
+  recognizer = await rmod.loadRecognizer({ baseUrl: MODEL_BASE });
+  recognizer.setUserReferences(store.get(USER_REFS_KEY, []));
+  segmenter = new fmod.SignSegmenter();
+}
+
 async function startCamera() {
   if (running) return;
   if (!navigator.mediaDevices?.getUserMedia) { toast("Câmera indisponível. Abra o app por HTTPS."); return; }
@@ -290,20 +304,22 @@ async function startCamera() {
     $("camera-toggle").disabled = true;
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
     video.srcObject = stream; await video.play();
-    await getLandmarker();
-    running = true; lastTs = -1;
+    setCamStatus("Carregando modelos de Libras…", false);
+    await Promise.all([loadVision(), loadModel()]);
+    segmenter.reset();
+    running = true; lastTs = -1; frameNo = 0; lastPoseRes = null;
     $("camera-hint").hidden = true;
     $("camera-toggle").textContent = "⏹ Parar câmera"; $("camera-toggle").classList.add("live");
     setCamStatus("Procurando mãos…", true);
     requestAnimationFrame(loop);
   } catch (err) {
     console.error(err);
-    toast(err.name === "NotAllowedError" ? "Permita o uso da câmera para continuar." : "Não foi possível iniciar a câmera.");
+    toast(err.name === "NotAllowedError" ? "Permita o uso da câmera para continuar." : "Não foi possível iniciar a câmera ou carregar o modelo de Libras.");
     stopCamera();
   } finally { $("camera-toggle").disabled = false; }
 }
 function stopCamera() {
-  running = false; recording = null;
+  running = false; teaching = null; segmenter?.reset();
   if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
   video.srcObject = null;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -317,8 +333,10 @@ function loop() {
   if (!running) return;
   if (video.readyState >= 2 && video.currentTime !== lastTs) {
     lastTs = video.currentTime;
-    const res = landmarker.detectForVideo(video, performance.now());
-    draw(res); handle(res);
+    const ts = performance.now();
+    const hands = handLm.detectForVideo(video, ts);
+    if (frameNo++ % 2 === 0) lastPoseRes = poseLm.detectForVideo(video, ts + 0.001);   // ombros mudam devagar: pose à metade da taxa
+    draw(hands); handle(hands, lastPoseRes, ts);
   }
   requestAnimationFrame(loop);
 }
@@ -327,56 +345,54 @@ function draw(res) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.lineWidth = 3; ctx.strokeStyle = "#69e7a9"; ctx.fillStyle = "#fff";
   for (const hand of res.landmarks || []) {
-    for (const c of HandLandmarker.HAND_CONNECTIONS) {
+    for (const c of mp.HandLandmarker.HAND_CONNECTIONS) {
       const a = hand[c.start], b = hand[c.end];
       ctx.beginPath(); ctx.moveTo(a.x * canvas.width, a.y * canvas.height); ctx.lineTo(b.x * canvas.width, b.y * canvas.height); ctx.stroke();
     }
     for (const p of hand) { ctx.beginPath(); ctx.arc(p.x * canvas.width, p.y * canvas.height, 3, 0, 7); ctx.fill(); }
   }
 }
-// vetor de 126 números: 21 pontos x 3 coords x 2 mãos, normalizado pelo pulso e pelo tamanho da mão
-function features(res) {
-  const out = new Array(126).fill(0);
-  (res.landmarks || []).forEach((hand, i) => {
-    const side = res.handednesses?.[i]?.[0]?.categoryName === "Left" ? 0 : 1;
-    const w = hand[0]; let max = 1e-6;
-    const pts = hand.map((p) => [p.x - w.x, p.y - w.y, p.z - w.z]);
-    for (const p of pts) max = Math.max(max, Math.hypot(...p));
-    pts.forEach((p, j) => { const o = side * 63 + j * 3; out[o] = p[0] / max; out[o + 1] = p[1] / max; out[o + 2] = p[2] / max; });
-  });
-  return out;
+
+/* Cada imagem vira um "frame"; o segmentador junta os frames de UM sinal (mão sobe → mão desce) */
+function handle(handRes, poseRes, now) {
+  const hasPose = !!poseRes?.landmarks?.length;
+  const frame = feat.makeFrame(handRes.landmarks, hasPose ? poseRes.landmarks[0] : null, video.videoWidth / video.videoHeight, now);
+  const seg = segmenter.push(frame);
+  if (seg) return onSegment(seg);
+  if (!hasPose) setCamStatus("Mostre os ombros e as mãos para a câmera", true);
+  else if (segmenter.recording) setCamStatus(teaching ? "Gravando o sinal…" : "Lendo o sinal…", true);
+  else setCamStatus(handRes.landmarks?.length ? "Mãos detectadas · baixe-as ao terminar" : "Pronto · faça um sinal", true);
 }
-function classify(v) {
-  if (!samples.length) return null;
-  const d = samples.map((s) => ({ label: s.label, d: Math.sqrt(s.v.reduce((a, x, i) => a + (x - v[i]) ** 2, 0)) })).sort((a, b) => a.d - b.d);
-  if (d[0].d > MAX_DIST) return null;
-  const top = d.slice(0, KNN_K), votes = {};
-  for (const t of top) votes[t.label] = (votes[t.label] || 0) + 1;
-  return Object.entries(votes).sort((a, b) => b[1] - a[1])[0][0];
+function onSegment(seg) {
+  const res = recognizer.classify(seg);
+  if (!res) return;
+  if (teaching) return finishTeaching(res.embedding);
+  if (!res.accepted) { setCamStatus("Não tenho certeza — escolha abaixo", true); return showSuggestions(res.top, false); }
+  words.push(res.top[0].label); showCamText();
+  setCamStatus(`Reconhecido: ${res.top[0].label}`, true);
+  showSuggestions(res.top.slice(1), true);
 }
-function handle(res) {
-  const now = performance.now();
-  if (!res.landmarks?.length) {
-    if (now - lastHandSeen > 1000) { candidate = null; candCount = 0; lastEmit.label = null; if (!recording) setCamStatus("Procurando mãos…", true); }
-    return;
+/* hipóteses alternativas: o usuário confirma ou corrige (reconhecimento de sinais nunca é 100%) */
+function showSuggestions(top, replaceLast) {
+  let box = $("camera-suggest");
+  if (!box) {
+    box = document.createElement("div"); box.id = "camera-suggest"; box.setAttribute("aria-live", "polite");
+    box.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0";
+    $("camera-text").after(box);
   }
-  lastHandSeen = now;
-  const v = features(res);
-  if (recording) { // modo ensinar
-    if (recording.left > 0) { recording.vecs.push(v); recording.left--; $("teach-msg").textContent = `Gravando… faltam ${recording.left}`; }
-    if (recording.left === 0) finishRecording();
-    return;
-  }
-  const label = classify(v);
-  if (!label) { candidate = null; candCount = 0; setCamStatus(samples.length ? "Mãos detectadas" : "Mãos detectadas · ensine sinais abaixo", true); return; }
-  if (label === candidate) candCount++; else { candidate = label; candCount = 1; }
-  setCamStatus(`Reconhecendo: ${label}`, true);
-  if (candCount >= STABLE_FRAMES && !(lastEmit.label === label && now - lastEmit.t < COOLDOWN_MS)) {
-    words.push(label); lastEmit = { label, t: now }; candCount = 0; showCamText();
+  box.replaceChildren();
+  if (!top.length) return;
+  const lead = document.createElement("small"); lead.textContent = replaceLast ? "Era outro sinal?" : "Você quis dizer:";
+  box.append(lead);
+  for (const t of top) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "hist-replay"; b.textContent = t.label;
+    b.onclick = () => { if (replaceLast) words[words.length - 1] = t.label; else words.push(t.label); showCamText(); box.replaceChildren(); };
+    box.append(b);
   }
 }
 $("camera-undo").onclick = () => { words.pop(); showCamText(); };
-function clearCamera() { words = []; showCamText(); lastEmit = { label: null, t: 0 }; if ("speechSynthesis" in window) speechSynthesis.cancel(); }
+function clearCamera() { words = []; showCamText(); $("camera-suggest")?.replaceChildren(); if ("speechSynthesis" in window) speechSynthesis.cancel(); }
 $("camera-clear").onclick = () => { clearCamera(); };
 $("camera-speak").onclick = () => {
   const text = words.join(" ");
@@ -389,14 +405,17 @@ $("camera-speak").onclick = () => {
   addHistory("camera", text); words = []; showCamText();
 };
 
-/* --- Ensinar sinais --- */
+/* --- Ensinar sinais: guarda só o embedding (128 números) de cada repetição --- */
 function renderSamples() {
-  const labels = [...new Set(samples.map((s) => s.label))];
+  const labels = [...new Set(store.get(USER_REFS_KEY, []).map((r) => r.label))];
   const ul = $("teach-list"); ul.replaceChildren();
   for (const l of labels) {
     const li = document.createElement("li"); li.append(l + " ");
     const b = document.createElement("button"); b.textContent = "×"; b.setAttribute("aria-label", "Remover " + l);
-    b.onclick = () => { samples = samples.filter((s) => s.label !== l); store.set("libras-samples", samples); renderSamples(); };
+    b.onclick = () => {
+      const rest = store.get(USER_REFS_KEY, []).filter((r) => r.label !== l);
+      store.set(USER_REFS_KEY, rest); recognizer?.setUserReferences(rest); renderSamples();
+    };
     li.append(b); ul.append(li);
   }
 }
@@ -404,14 +423,17 @@ $("teach-record").onclick = async () => {
   const label = $("teach-label").value.trim();
   if (!label) return toast("Digite a palavra do sinal primeiro.");
   if (!running) { await startCamera(); if (!running) return; }
-  $("teach-msg").textContent = "Faça o sinal diante da câmera…";
-  recording = { label, left: 25, vecs: [] };
+  teaching = { label, n: 0, want: 3 };
+  $("teach-msg").textContent = `Faça o sinal “${label}” (1 de 3). Baixe as mãos entre uma repetição e outra.`;
 };
-function finishRecording() {
-  const r = recording; recording = null;
-  for (const v of r.vecs) samples.push({ label: r.label, v });
-  store.set("libras-samples", samples); renderSamples();
-  $("teach-msg").textContent = `“${r.label}” gravado. Faça o sinal de novo para testar.`;
+function finishTeaching(emb) {
+  const t = teaching; t.n++;
+  const refs = store.get(USER_REFS_KEY, []);
+  refs.push({ label: t.label, e: Array.from(emb, (v) => Math.round(v * 1e4) / 1e4) });
+  store.set(USER_REFS_KEY, refs); recognizer.setUserReferences(refs);
+  if (t.n < t.want) { $("teach-msg").textContent = `Boa! Repita o sinal (${t.n + 1} de ${t.want}).`; return; }
+  teaching = null; renderSamples();
+  $("teach-msg").textContent = `“${t.label}” gravado. Faça o sinal de novo para testar.`;
   $("teach-label").value = "";
 }
 

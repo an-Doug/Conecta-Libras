@@ -223,3 +223,15 @@ __marimo__/
 # Custom
 versions
 conecta-libras-reconhecimento
+package-lock.json
+package.json
+
+# Treino de Libras (ml/)
+ml/out*/
+ml/fake/
+ml/.venv/
+ml/**/cache_samples.pkl
+node_modules/
+
+# Configuração pessoal do VS Code
+.vscode/

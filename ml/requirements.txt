@@ -1,0 +1,8 @@
+# Testado com Python 3.13 + TensorFlow 2.21. Funciona também em 3.10–3.12.
+# NÃO instale o pacote "tensorflowjs": o script grava o formato TF.js sozinho.
+tensorflow>=2.16
+tf_keras>=2.16
+numpy
+pandas
+pyarrow
+huggingface_hub
