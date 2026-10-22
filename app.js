@@ -16,6 +16,9 @@ extraCss.textContent = `
 .diag-bar{height:10px;background:#e1e7f0;border-radius:99px;overflow:hidden}
 .diag-bar i{display:block;height:100%;width:0;background:var(--green)}
 .diag-log{font:12px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap;background:#f1f4f9;border-radius:12px;padding:8px;max-height:200px;overflow:auto;margin:8px 0 0;color:var(--ink)}
+.setting{display:grid;gap:2px;margin:14px 0}.setting label{font-weight:700}.setting small{margin:0}
+.setting input[type=range]{width:100%;min-height:36px}
+.setting.check{display:flex;gap:10px;align-items:center;font-weight:700}.setting.check input{width:22px;height:22px}
 `;
 document.head.appendChild(extraCss);
 
@@ -261,6 +264,10 @@ let stream = null, mp = null, handLm = null, poseLm = null, recognizer = null, s
 let running = false, lastTs = -1, frameNo = 0, lastPoseRes = null;
 let words = [];
 let teaching = null; // {label, n, want}
+const CAM_SETTINGS_KEY = "libras-cam-settings";
+const CAM_DEFAULTS = { endMs: 800, minActiveMs: 500, minSim: null, speakEach: true };  // minSim null = usa o sugerido pelo treino
+const camCfg = { ...CAM_DEFAULTS, ...store.get(CAM_SETTINGS_KEY, {}) };
+let refreshCamUi = () => {};
 try { localStorage.removeItem("libras-samples"); } catch {}   // formato antigo (kNN de frames)
 
 function setCamStatus(text, live) {
@@ -294,6 +301,7 @@ async function loadModel() {
   recognizer = await rmod.loadRecognizer({ baseUrl: MODEL_BASE });
   recognizer.setUserReferences(store.get(USER_REFS_KEY, []));
   segmenter = new fmod.SignSegmenter();
+  applyCamSettings(); refreshCamUi();
 }
 
 async function startCamera() {
@@ -302,6 +310,7 @@ async function startCamera() {
   try {
     setCamStatus("Iniciando câmera…", false);
     $("camera-toggle").disabled = true;
+    if ("speechSynthesis" in window) speechSynthesis.speak(new SpeechSynthesisUtterance(""));   // libera a voz (iOS/Android exigem um toque)
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
     video.srcObject = stream; await video.play();
     setCamStatus("Carregando modelos de Libras…", false);
@@ -363,16 +372,34 @@ function handle(handRes, poseRes, now) {
   else if (segmenter.recording) setCamStatus(teaching ? "Gravando o sinal…" : "Lendo o sinal…", true);
   else setCamStatus(handRes.landmarks?.length ? "Mãos detectadas · baixe-as ao terminar" : "Pronto · faça um sinal", true);
 }
+function speakWord(text) {
+  if (!camCfg.speakEach || !("speechSynthesis" in window)) return;
+  const u = new SpeechSynthesisUtterance(text); u.lang = "pt-BR"; u.rate = 0.95;
+  speechSynthesis.speak(u);
+}
+/* resultado do último sinal fica fixo na tela (com a confiança, para você calibrar o limite nos Ajustes) */
+function showLast(text, score) {
+  let el = $("camera-last");
+  if (!el) {
+    el = document.createElement("p"); el.id = "camera-last"; el.className = "muted small"; el.setAttribute("aria-live", "polite");
+    $("camera-status").after(el);
+  }
+  el.textContent = text ? `${text} · confiança ${score.toFixed(2).replace(".", ",")}` : "";
+}
 function onSegment(seg) {
   const res = recognizer.classify(seg);
   if (!res) return;
   if (teaching) return finishTeaching(res.embedding);
-  if (!res.accepted) { setCamStatus("Não tenho certeza — escolha abaixo", true); return showSuggestions(res.top, false); }
-  words.push(res.top[0].label); showCamText();
-  setCamStatus(`Reconhecido: ${res.top[0].label}`, true);
+  const best = res.top[0];
+  if (!res.accepted) {
+    showLast(`Não tenho certeza: ${best.label}?`, best.score);
+    return showSuggestions(res.top, false);
+  }
+  words.push(best.label); showCamText(); speakWord(best.label);
+  showLast(`Reconhecido: ${best.label}`, best.score);
   showSuggestions(res.top.slice(1), true);
 }
-/* hipóteses alternativas: o usuário confirma ou corrige (reconhecimento de sinais nunca é 100%) */
+/* hipóteses alternativas: ficam na tela até o próximo sinal ou até você escolher uma */
 function showSuggestions(top, replaceLast) {
   let box = $("camera-suggest");
   if (!box) {
@@ -387,12 +414,15 @@ function showSuggestions(top, replaceLast) {
   for (const t of top) {
     const b = document.createElement("button");
     b.type = "button"; b.className = "hist-replay"; b.textContent = t.label;
-    b.onclick = () => { if (replaceLast) words[words.length - 1] = t.label; else words.push(t.label); showCamText(); box.replaceChildren(); };
+    b.onclick = () => {
+      if (replaceLast) words[words.length - 1] = t.label; else words.push(t.label);
+      showCamText(); speakWord(t.label); box.replaceChildren();
+    };
     box.append(b);
   }
 }
 $("camera-undo").onclick = () => { words.pop(); showCamText(); };
-function clearCamera() { words = []; showCamText(); $("camera-suggest")?.replaceChildren(); if ("speechSynthesis" in window) speechSynthesis.cancel(); }
+function clearCamera() { words = []; showCamText(); $("camera-suggest")?.replaceChildren(); showLast(""); if ("speechSynthesis" in window) speechSynthesis.cancel(); }
 $("camera-clear").onclick = () => { clearCamera(); };
 $("camera-speak").onclick = () => {
   const text = words.join(" ");
@@ -404,6 +434,47 @@ $("camera-speak").onclick = () => {
   speechSynthesis.speak(u);
   addHistory("camera", text); words = []; showCamText();
 };
+
+/* --- Ajustes de tempo, confiança e voz (guardados neste aparelho) --- */
+function applyCamSettings() {
+  if (segmenter) { segmenter.endMs = camCfg.endMs; segmenter.minActiveMs = camCfg.minActiveMs; }
+  if (recognizer && camCfg.minSim != null) recognizer.minSim = camCfg.minSim;
+}
+(function setupCamSettings() {
+  const d = document.createElement("details"); d.className = "panel mt"; d.id = "cam-settings";
+  d.innerHTML =
+    '<summary>Ajustes do reconhecimento</summary>' +
+    '<p class="muted small">Adapte o ritmo ao seu jeito de sinalizar. Os valores ficam salvos neste aparelho.</p>' +
+    '<div class="setting"><label for="set-end"></label><input id="set-end" type="range" min="300" max="2500" step="100">' +
+    '<small class="muted">Quanto tempo com as mãos baixas o app espera antes de reconhecer. Aumente se ele reconhece cedo demais.</small></div>' +
+    '<div class="setting"><label for="set-min"></label><input id="set-min" type="range" min="200" max="1500" step="100">' +
+    '<small class="muted">Movimentos mais curtos que isso são ignorados (evita reconhecer gestos sem querer).</small></div>' +
+    '<div class="setting"><label for="set-sim"></label><input id="set-sim" type="range" min="0.2" max="0.95" step="0.01">' +
+    '<small class="muted">Abaixo disso o app só sugere opções, sem escrever a palavra. Veja a confiança de cada sinal sob o status da câmera.</small></div>' +
+    '<label class="setting check"><input id="set-speak" type="checkbox"> Falar cada palavra ao reconhecer</label>' +
+    '<button id="set-reset" class="btn outline" type="button">Restaurar padrão</button>';
+  $("teach").before(d);
+  const sec = (ms) => (ms / 1000).toFixed(1).replace(".", ",") + " s";
+  const simNow = () => camCfg.minSim ?? recognizer?.vocab?.suggested_min_sim ?? 0.6;
+  refreshCamUi = () => {
+    $("set-end").value = camCfg.endMs; $("set-min").value = camCfg.minActiveMs;
+    $("set-sim").value = simNow(); $("set-speak").checked = camCfg.speakEach;
+    d.querySelector('label[for="set-end"]').textContent = "Pausa para fechar o sinal: " + sec(camCfg.endMs);
+    d.querySelector('label[for="set-min"]').textContent = "Duração mínima do sinal: " + sec(camCfg.minActiveMs);
+    d.querySelector('label[for="set-sim"]').textContent = "Confiança mínima: " + simNow().toFixed(2).replace(".", ",");
+  };
+  const save = () => { store.set(CAM_SETTINGS_KEY, camCfg); applyCamSettings(); refreshCamUi(); };
+  $("set-end").oninput = (e) => { camCfg.endMs = +e.target.value; save(); };
+  $("set-min").oninput = (e) => { camCfg.minActiveMs = +e.target.value; save(); };
+  $("set-sim").oninput = (e) => { camCfg.minSim = +e.target.value; save(); };
+  $("set-speak").onchange = (e) => { camCfg.speakEach = e.target.checked; save(); };
+  $("set-reset").onclick = () => {
+    Object.assign(camCfg, CAM_DEFAULTS);
+    if (recognizer) recognizer.minSim = recognizer.vocab.suggested_min_sim ?? 0.6;
+    save(); toast("Ajustes restaurados.");
+  };
+  refreshCamUi();
+})();
 
 /* --- Ensinar sinais: guarda só o embedding (128 números) de cada repetição --- */
 function renderSamples() {
