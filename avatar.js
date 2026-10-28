@@ -27,8 +27,8 @@ export function createAvatar(THREE, container) {
   scene.add(new THREE.HemisphereLight(0xffffff, 0x8fa3c4, 1.1));
   const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(1.5, 3, 3); scene.add(key);
   const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 20);
-  camera.position.set(0, 1.35, 2.8);
-  camera.lookAt(0, 1.3, 0);
+  camera.position.set(0, 1.32, 2.6); // enquadra cabeça, tronco e o espaço de sinalização
+  camera.lookAt(0, 1.28, 0);
 
   const rig = buildRig(THREE);
   scene.add(rig.root);
@@ -70,6 +70,7 @@ export function createAvatar(THREE, container) {
       rig.apply(cur);
     }
     rig.torso.scale.y = 1 + Math.sin(now / 900) * 0.008; // respiração sutil
+    rig.idle?.(now); // piscar de olhos
     renderer.render(scene, camera);
   }
   raf = requestAnimationFrame(tick);
