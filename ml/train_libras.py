@@ -521,7 +521,7 @@ def main():
                     "val_top1_por_base": {k: round(v, 4) for k, v in per.items()},
                     "validacao": "sinalizantes inéditos (kNN sobre embeddings do treino)"},
     }
-    (out / "vocab.json").write_text(json.dumps(vocab, ensure_ascii=False))
+    (out / "vocab.json").write_text(json.dumps(vocab, ensure_ascii=False), encoding="utf-8")
 
     # fixture de paridade p/ o features.js
     s0 = val[0]
@@ -545,7 +545,7 @@ def main():
             sizes[str(f.relative_to(out))] = f.stat().st_size
     (out / "report.json").write_text(json.dumps({"metrics": vocab["metrics"], "bytes": sizes,
                                                   "n_classes": n_classes, "n_train": len(train),
-                                                  "n_val": len(val)}, ensure_ascii=False, indent=2))
+                                                  "n_val": len(val)}, ensure_ascii=False, indent=2), encoding="utf-8")
     if a.copy_to:
         import shutil
         dst = Path(a.copy_to)

@@ -147,10 +147,14 @@ export function buildRig(THREE) {
       a.shoulder.rotation.set(-s.sx, 0, a.side * s.sz);
       a.elbow.rotation.set(-s.el, -a.side * s.ro, 0);
       a.wrist.rotation.set(-s.wx, 0, a.side * s.wz);
+      // sp[i]: abertura lateral do dedo (rad, + = em direção ao polegar); tc: polegar cruzando à frente da mão (0..1)
       a.fingers.forEach((fg, i) => {
-        const c = s.f[i];
-        if (fg.thumb) fg.pivots[0].rotation.set(0, 0, a.side * (-0.5 + c * 1.1)); // fecha em direção à palma
-        else { fg.pivots[0].rotation.x = -c * 1.4; fg.pivots[1].rotation.x = -c * 1.2; }
+        const c = s.f[i], sp = s.sp?.[i] ?? 0;
+        if (fg.thumb) fg.pivots[0].rotation.set(-(s.tc ?? 0) * 1.1, 0, a.side * (-0.5 + c * 1.1 - sp)); // fecha em direção à palma
+        else {
+          fg.pivots[0].rotation.set(-c * 1.4, 0, -a.side * sp);
+          fg.pivots[1].rotation.x = -c * 1.2;
+        }
       });
     }
     head.rotation.set(p.head.rx, p.head.ry, 0);

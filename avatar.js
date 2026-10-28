@@ -11,6 +11,8 @@ function blend(a, b, k) {
     const o = {};
     for (const n of ["sx", "sz", "el", "ro", "wx", "wz"]) o[n] = mix(a[key][n], b[key][n], k);
     o.f = a[key].f.map((v, i) => mix(v, b[key].f[i], k));
+    o.sp = [0, 1, 2, 3, 4].map((i) => mix(a[key].sp?.[i] ?? 0, b[key].sp?.[i] ?? 0, k));
+    o.tc = mix(a[key].tc ?? 0, b[key].tc ?? 0, k);
     out[key] = o;
   }
   return out;
@@ -27,8 +29,8 @@ export function createAvatar(THREE, container) {
   scene.add(new THREE.HemisphereLight(0xffffff, 0x8fa3c4, 1.1));
   const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(1.5, 3, 3); scene.add(key);
   const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 20);
-  camera.position.set(0, 1.32, 2.6); // enquadra cabeça, tronco e o espaço de sinalização
-  camera.lookAt(0, 1.28, 0);
+  camera.position.set(0, 1.4, 2.05); // aproxima: cabeça, tronco e a mão que sinaliza ficam maiores
+  camera.lookAt(0, 1.37, 0);
 
   const rig = buildRig(THREE);
   scene.add(rig.root);
