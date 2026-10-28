@@ -22,8 +22,15 @@ export class SignRecognizer {
     this.tf = tf; this.model = model; this.vocab = vocab;
     this.D = vocab.embedding_dim;
     this.labels = [...vocab.labels];
-    this.refs = Array.from({ length: vocab.n_refs }, (_, i) => refs.subarray(i * this.D, (i + 1) * this.D));
-    this.refLabels = [...vocab.ref_labels];
+    // ignora referências de classes sem rótulo válido ("<NA>", vazio…) que treinos antigos deixaram passar
+    const bad = (c) => /^(<na>|nan|none|null|n\/a)?$/i.test(String(this.labels[c] ?? "").trim());
+    this.refs = []; this.refLabels = [];
+    for (let i = 0; i < vocab.n_refs; i++) {
+      if (bad(vocab.ref_labels[i])) continue;
+      this.refs.push(refs.subarray(i * this.D, (i + 1) * this.D)); this.refLabels.push(vocab.ref_labels[i]);
+    }
+    this.nBase = this.refs.length;
+    this.droppedRefs = vocab.n_refs - this.nBase;
     this.minSim = vocab.suggested_min_sim ?? 0.6;
   }
 
@@ -35,6 +42,8 @@ export class SignRecognizer {
     const y = tf.tidy(() => this.model.predict(tf.tensor3d(feats, [1, CONTRACT.T, CONTRACT.FEAT_DIM])));
     const e = Float32Array.from(y.dataSync());
     y.dispose();
+    const mu = this.vocab.embedding_mean;               // mesma centralização do treino
+    if (mu) for (let j = 0; j < e.length; j++) e[j] -= mu[j];
     return Float32Array.from(l2(e));
   }
 
@@ -66,7 +75,7 @@ export class SignRecognizer {
 
   /** Substitui todas as referências do usuário ([{label, e}]) mantendo as do modelo base. */
   setUserReferences(list) {
-    const n = this.vocab.n_refs;
+    const n = this.nBase;
     this.refs.length = n; this.refLabels.length = n; this.labels.length = this.vocab.labels.length;
     for (const r of list) this.addReference(r.label, r.e);
   }

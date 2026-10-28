@@ -60,7 +60,8 @@ ok(feats.length === P.features.length && maxd < 1e-4, `features iguais ao Python
 console.log("modelo TF.js");
 const rec = await loadRecognizer({ baseUrl: base, tf });
 const emb = rec.embed(frames);
-const exp = l2(P.embedding);
+const mu = rec.vocab.embedding_mean || P.embedding.map(() => 0);
+const exp = l2(P.embedding.map((v, i) => v - mu[i]));
 const cos = emb.reduce((a, x, i) => a + x * exp[i], 0);
 ok(cos > 0.999, `embedding do TF.js ≈ Keras (cosseno ${cos.toFixed(6)})`);
 const res = rec.classify(frames);
@@ -70,7 +71,18 @@ console.log("sinais ensinados pelo usuário");
 rec.setUserReferences([{ label: "MeuSinal", e: Array.from(emb) }]);
 ok(rec.classify(frames).top[0].label === "MeuSinal" || rec.classify(frames).top[0].score > 0.999, "referência do usuário entra no ranking");
 rec.setUserReferences([]);
-ok(!rec.labels.includes("MeuSinal") && rec.refs.length === rec.vocab.n_refs, "remover referências do usuário restaura o modelo base");
+ok(!rec.labels.includes("MeuSinal") && rec.refs.length === rec.nBase, "remover referências do usuário restaura o modelo base");
+
+console.log("rótulos inválidos (<NA>)");
+{
+  const { SignRecognizer } = await import("../recognizer.js");
+  const refs = new Float32Array(await (await fetch(base + "refs.f32")).arrayBuffer());
+  const vocab = JSON.parse(JSON.stringify(rec.vocab));
+  vocab.labels[0] = "<NA>";                       // simula um modelo treinado com a classe "<NA>"
+  const r2 = new SignRecognizer({ tf, model: rec.model, vocab, refs });
+  const all = r2.classify(frames, 99).top.map((t) => t.label);
+  ok(r2.droppedRefs > 0 && !all.includes("<NA>"), `classe "<NA>" some do ranking (${r2.droppedRefs} referências ignoradas)`);
+}
 
 console.log("segmentador");
 const rest = (t) => ({ t, hands: [null, null], pose: frames[0].pose });

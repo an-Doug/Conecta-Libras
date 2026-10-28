@@ -21,6 +21,7 @@ lido em blocos, só com as colunas necessárias. O resultado fica em cache (--ca
 Uso rápido
     pip install -r requirements.txt
     python train_libras.py --out out                       # baixa o dataset (~14 GB) e treina
+    python train_libras.py --out out --copy-to ../models/libras-v1   # treina e já copia o modelo para o app
     python train_libras.py --csv /dados/frames.csv --classes /dados/classes.csv --out out
     python make_fake_frames.py --out fake && \
     python train_libras.py --csv fake/frames.csv --classes fake/classes.csv --out out_fake --epochs 15   # teste rápido
@@ -151,6 +152,18 @@ def prep_train(s, rng):
 # ============================================================================
 # DADOS
 # ============================================================================
+INVALID_LABELS = {"", "<na>", "nan", "none", "null", "n/a"}
+
+
+def valid_label(x):
+    """False para rótulos vazios/NA (pandas devolve <NA> quando o classes.csv tem um rótulo em branco)."""
+    return str(x).strip().lower() not in INVALID_LABELS
+
+
+# o dataset grava rótulos sem acento; a voz do navegador pronuncia "Maca" (maca) diferente de "Maçã" (fruta)
+DISPLAY_FIX = {"america": "América", "maca": "Maçã"}
+
+
 def norm_label(s):
     s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode().lower().strip()
     return " ".join(s.split())
@@ -193,14 +206,20 @@ def load_raw(csv_path, classes_path, datasets, aspect, hand_order):
     cls = pd.read_csv(classes_path, dtype="string")
     cid2label = dict(zip(cls["class_id"], cls["label"]))
 
-    samples, dropped = [], 0
+    bad = sorted(c for c, l in cid2label.items() if not valid_label(l) and c.split("::")[0] in datasets)
+    if bad:
+        print(f"  classes SEM rótulo no classes.csv (serão descartadas): {', '.join(bad[:12])}{' …' if len(bad) > 12 else ''}")
+    samples, dropped, no_label = [], 0, 0
     for sid, d in acc.items():
         fr = np.concatenate(d["fr"])
         X = np.concatenate(d["x"])[np.argsort(fr, kind="stable")]
         hands = X[:, :84].reshape(-1, 2, N_HAND, 2).copy()
         pose = fill_pose(X[:, 84:].reshape(-1, len(POSE_IDX), 2).copy())
         label = cid2label.get(d["cid"])
-        if pose is None or label is None or len(X) < 8 or np.isnan(hands).all():
+        if not valid_label(label):
+            no_label += 1
+            continue
+        if pose is None or len(X) < 8 or np.isnan(hands).all():
             dropped += 1
             continue
         a = aspect.get(d["ds"], 16 / 9)
@@ -208,7 +227,8 @@ def load_raw(csv_path, classes_path, datasets, aspect, hand_order):
         pose[..., 0] *= a
         samples.append({"id": sid, "ds": d["ds"], "signer": f'{d["ds"]}:{d["signer"]}',
                         "label": str(label), "hands": hands, "pose": pose})
-    print(f"  {len(samples)} amostras válidas ({dropped} descartadas)")
+    print(f"  {len(samples)} amostras válidas ({dropped} descartadas por dados incompletos, "
+          f"{no_label} sem rótulo no classes.csv)")
     return fix_hand_order(samples, hand_order)
 
 
@@ -304,8 +324,10 @@ def knn_scores(q, refs, ref_y, n_classes):
 
 
 def evaluate(encoder, tr, va, ytr, yva, n_classes, ds_va):
-    etr = l2n(encoder.predict(tr, batch_size=256, verbose=0))
-    eva = l2n(encoder.predict(va, batch_size=256, verbose=0))
+    rtr = encoder.predict(tr, batch_size=256, verbose=0)
+    mu = rtr.mean(0)                                   # centralizar espalha os ângulos: o cosseno vira uma confiança útil
+    etr = l2n(rtr - mu)
+    eva = l2n(encoder.predict(va, batch_size=256, verbose=0) - mu)
     sc = knn_scores(eva, etr, ytr, n_classes)
     top = np.argsort(-sc, axis=1)[:, :3]
     top1 = float((top[:, 0] == yva).mean())
@@ -395,6 +417,9 @@ def main():
     ap.add_argument("--max-refs-per-class", type=int, default=30)
     ap.add_argument("--quantize", choices=["float16", "none"], default="float16")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--copy-to", metavar="PASTA",
+                    help="ao terminar, copia model/, refs.f32 e vocab.json para esta pasta do app "
+                         "(ex.: ..\\models\\libras-v1); substitui o modelo anterior")
     a = ap.parse_args()
 
     out = Path(a.out)
@@ -418,6 +443,10 @@ def main():
         samples = load_raw(csv_path, classes_path, set(a.datasets), aspect, a.hand_order)
         with open(cache, "wb") as f:
             pickle.dump(samples, f, protocol=4)
+    n0 = len(samples)
+    samples = [s for s in samples if valid_label(s["label"])]      # também limpa caches antigos (rótulo "<NA>")
+    if len(samples) < n0:
+        print(f"      {n0 - len(samples)} amostras sem rótulo válido (ex.: '<NA>') removidas")
     if not samples:
         sys.exit("Nenhuma amostra encontrada. Confira --datasets e os arquivos de entrada.")
 
@@ -429,7 +458,7 @@ def main():
         s["key"] = k
     keys = sorted(display)
     k2i = {k: i for i, k in enumerate(keys)}
-    labels = [display[k] for k in keys]
+    labels = [DISPLAY_FIX.get(k, display[k]) for k in keys]
     for s in samples:
         s["y"] = k2i[s["key"]]
         s["hands_t"], s["pose_t"] = trim_active(s["hands"], s["pose"])
@@ -473,7 +502,9 @@ def main():
     yall = np.concatenate([ytr, yva])
     allsamples = train + val
     sel = pick_refs(allsamples, yall, a.max_refs_per_class, a.seed)
-    E = l2n(encoder.predict(Xall[sel], batch_size=256, verbose=0)).astype(np.float32)
+    R = encoder.predict(Xall[sel], batch_size=256, verbose=0)
+    mu = R.mean(0)
+    E = l2n(R - mu).astype(np.float32)
     (out / "refs.f32").write_bytes(E.tobytes())
 
     # ---------- 4. exportação ----------
@@ -481,6 +512,7 @@ def main():
     export_tfjs(encoder, out / "model", a.quantize)
     vocab = {
         "version": CONTRACT_VERSION, "T": T, "feat_dim": FEAT_DIM, "embedding_dim": a.emb,
+        "build": int(time.time()), "embedding_mean": [round(float(v), 6) for v in mu],
         "labels": labels, "suggested_min_sim": round(min_sim, 3), "n_refs": int(len(sel)), "ref_labels": [int(v) for v in yall[sel]],
         "refs_file": "refs.f32", "datasets": a.datasets,
         "features": {"pose_idx": POSE_IDX, "active_y": ACTIVE_Y, "trim_margin": TRIM_MARGIN,
@@ -514,6 +546,16 @@ def main():
     (out / "report.json").write_text(json.dumps({"metrics": vocab["metrics"], "bytes": sizes,
                                                   "n_classes": n_classes, "n_train": len(train),
                                                   "n_val": len(val)}, ensure_ascii=False, indent=2))
+    if a.copy_to:
+        import shutil
+        dst = Path(a.copy_to)
+        dst.mkdir(parents=True, exist_ok=True)
+        if (dst / "model").exists():
+            shutil.rmtree(dst / "model")            # evita sobrar pedaços do modelo antigo
+        shutil.copytree(out / "model", dst / "model")
+        shutil.copy2(out / "refs.f32", dst / "refs.f32")
+        shutil.copy2(out / "vocab.json", dst / "vocab.json")
+        print(f"      copiado para {dst.resolve()}: model/, refs.f32, vocab.json")
     print("[5/5] Concluído")
     print(f"      validação (sinalizante inédito): top1 {top1 * 100:.1f}% · top3 {top3 * 100:.1f}%  {per}")
     print("      tamanhos (o que o navegador baixa):")

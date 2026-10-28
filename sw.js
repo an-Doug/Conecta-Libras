@@ -1,4 +1,4 @@
-const CACHE = "conecta-libras-v3";
+const CACHE = "conecta-libras-v4";
 const SHELL = ["./", "index.html", "style.css", "app.js", "avatar.js", "rig.js", "signs.js", "recognizer/features.js", "recognizer/recognizer.js", "manifest.webmanifest", "icon.svg"];
 
 self.addEventListener("install", (e) => {

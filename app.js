@@ -268,6 +268,8 @@ const CAM_SETTINGS_KEY = "libras-cam-settings";
 const CAM_DEFAULTS = { endMs: 800, minActiveMs: 500, minSim: null, speakEach: true };  // minSim null = usa o sugerido pelo treino
 const camCfg = { ...CAM_DEFAULTS, ...store.get(CAM_SETTINGS_KEY, {}) };
 let refreshCamUi = () => {};
+const MISS_LIMIT = 3;   // a cada 3 sinais seguidos não reconhecidos, mostra o aviso (sem voz)
+let missStreak = 0;
 try { localStorage.removeItem("libras-samples"); } catch {}   // formato antigo (kNN de frames)
 
 function setCamStatus(text, live) {
@@ -299,7 +301,12 @@ async function loadModel() {
   const [rmod, fmod] = await Promise.all([import("./recognizer/recognizer.js"), import("./recognizer/features.js")]);
   feat = fmod;
   recognizer = await rmod.loadRecognizer({ baseUrl: MODEL_BASE });
-  recognizer.setUserReferences(store.get(USER_REFS_KEY, []));
+  const saved = store.get(USER_REFS_KEY, []), fresh = saved.filter((r) => r.m === recognizer.vocab.build);
+  if (fresh.length !== saved.length) {          // sinais ensinados com outra versão do modelo não servem mais
+    store.set(USER_REFS_KEY, fresh); renderSamples();
+    toast("O modelo foi atualizado: grave de novo os sinais que você ensinou.");
+  }
+  recognizer.setUserReferences(fresh);
   segmenter = new fmod.SignSegmenter();
   applyCamSettings(); refreshCamUi();
 }
@@ -384,7 +391,7 @@ function showLast(text, score) {
     el = document.createElement("p"); el.id = "camera-last"; el.className = "muted small"; el.setAttribute("aria-live", "polite");
     $("camera-status").after(el);
   }
-  el.textContent = text ? `${text} · confiança ${score.toFixed(2).replace(".", ",")}` : "";
+  el.textContent = !text ? "" : score == null ? text : `${text} · confiança ${score.toFixed(2).replace(".", ",")}`;
 }
 function onSegment(seg) {
   const res = recognizer.classify(seg);
@@ -392,9 +399,15 @@ function onSegment(seg) {
   if (teaching) return finishTeaching(res.embedding);
   const best = res.top[0];
   if (!res.accepted) {
+    if (++missStreak >= MISS_LIMIT) {            // só avisa na tela: nada é falado nem escrito
+      missStreak = 0;
+      $("camera-suggest")?.replaceChildren();
+      return showLast("Sinal não reconhecido. Tente de novo mostrando ombros e mãos.");
+    }
     showLast(`Não tenho certeza: ${best.label}?`, best.score);
     return showSuggestions(res.top, false);
   }
+  missStreak = 0;
   words.push(best.label); showCamText(); speakWord(best.label);
   showLast(`Reconhecido: ${best.label}`, best.score);
   showSuggestions(res.top.slice(1), true);
@@ -422,7 +435,7 @@ function showSuggestions(top, replaceLast) {
   }
 }
 $("camera-undo").onclick = () => { words.pop(); showCamText(); };
-function clearCamera() { words = []; showCamText(); $("camera-suggest")?.replaceChildren(); showLast(""); if ("speechSynthesis" in window) speechSynthesis.cancel(); }
+function clearCamera() { words = []; missStreak = 0; showCamText(); $("camera-suggest")?.replaceChildren(); showLast(""); if ("speechSynthesis" in window) speechSynthesis.cancel(); }
 $("camera-clear").onclick = () => { clearCamera(); };
 $("camera-speak").onclick = () => {
   const text = words.join(" ");
@@ -449,7 +462,7 @@ function applyCamSettings() {
     '<small class="muted">Quanto tempo com as mãos baixas o app espera antes de reconhecer. Aumente se ele reconhece cedo demais.</small></div>' +
     '<div class="setting"><label for="set-min"></label><input id="set-min" type="range" min="200" max="1500" step="100">' +
     '<small class="muted">Movimentos mais curtos que isso são ignorados (evita reconhecer gestos sem querer).</small></div>' +
-    '<div class="setting"><label for="set-sim"></label><input id="set-sim" type="range" min="0.2" max="0.95" step="0.01">' +
+    '<div class="setting"><label for="set-sim"></label><input id="set-sim" type="range" min="0" max="1" step="0.01">' +
     '<small class="muted">Abaixo disso o app só sugere opções, sem escrever a palavra. Veja a confiança de cada sinal sob o status da câmera.</small></div>' +
     '<label class="setting check"><input id="set-speak" type="checkbox"> Falar cada palavra ao reconhecer</label>' +
     '<button id="set-reset" class="btn outline" type="button">Restaurar padrão</button>';
@@ -500,7 +513,7 @@ $("teach-record").onclick = async () => {
 function finishTeaching(emb) {
   const t = teaching; t.n++;
   const refs = store.get(USER_REFS_KEY, []);
-  refs.push({ label: t.label, e: Array.from(emb, (v) => Math.round(v * 1e4) / 1e4) });
+  refs.push({ label: t.label, m: recognizer.vocab.build, e: Array.from(emb, (v) => Math.round(v * 1e4) / 1e4) });
   store.set(USER_REFS_KEY, refs); recognizer.setUserReferences(refs);
   if (t.n < t.want) { $("teach-msg").textContent = `Boa! Repita o sinal (${t.n + 1} de ${t.want}).`; return; }
   teaching = null; renderSamples();
