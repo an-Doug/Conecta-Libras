@@ -125,11 +125,18 @@ export function buildRig(THREE) {
     wrist.add(mesh(new THREE.BoxGeometry(0.11, 0.115, 0.04), skin, 0, -0.0575, 0));
 
     const fingers = [];
-    const thumb = new THREE.Group(); thumb.position.set(-side * 0.065, -0.04, 0); wrist.add(thumb);
-    thumb.add(mesh(new THREE.CapsuleGeometry(0.012, 0.04, 3, 8), skin, 0, -0.032, 0));
-    fingers.push({ pivots: [thumb], thumb: true });
+    // mão anatomicamente correta: o polegar fica do lado do indicador, e é o lado de DENTRO do corpo
+    // quando a palma olha para a frente (mão direita = -X). Antes estava espelhada.
+    // base do polegar no meio da palma (como na mão real) e dois segmentos longos o bastante para tocar
+    // a ponta dos dedos curvos (D, F, O, T). Segmentos: 6 cm + 5 cm.
+    const thumb = new THREE.Group(); thumb.position.set(side * 0.058, -0.062, 0); wrist.add(thumb);
+    const TL1 = 0.06, TL2 = 0.05;
+    thumb.add(mesh(new THREE.CapsuleGeometry(0.0125, TL1 - 0.025, 3, 8), skin, 0, -TL1 / 2, 0));
+    const thumb2 = new THREE.Group(); thumb2.position.y = -TL1; thumb.add(thumb2); // 2ª articulação (ponta)
+    thumb2.add(mesh(new THREE.CapsuleGeometry(0.0115, TL2 - 0.023, 3, 8), skin, 0, -TL2 / 2, 0));
+    fingers.push({ pivots: [thumb, thumb2], thumb: true });
     for (let k = 0; k < 4; k++) {
-      const p1 = new THREE.Group(); p1.position.set(-side * (0.039 - 0.026 * k), -0.115, 0); wrist.add(p1);
+      const p1 = new THREE.Group(); p1.position.set(side * (0.039 - 0.026 * k), -0.115, 0); wrist.add(p1);
       const len = [0.055, 0.062, 0.058, 0.047][k], r = 0.011;
       p1.add(mesh(new THREE.CapsuleGeometry(r, len - 2 * r, 3, 8), skin, 0, -len / 2, 0));
       const p2 = new THREE.Group(); p2.position.y = -len; p1.add(p2);
@@ -147,12 +154,15 @@ export function buildRig(THREE) {
       a.shoulder.rotation.set(-s.sx, 0, a.side * s.sz);
       a.elbow.rotation.set(-s.el, -a.side * s.ro, 0);
       a.wrist.rotation.set(-s.wx, 0, a.side * s.wz);
-      // sp[i]: abertura lateral do dedo (rad, + = em direção ao polegar); tc: polegar cruzando à frente da mão (0..1)
+      // sp[i]: abertura lateral do dedo (rad, + = em direção ao polegar); tc: polegar à frente da palma (0..1);
+      // tb: dobra da ponta do polegar (0..1)
       a.fingers.forEach((fg, i) => {
         const c = s.f[i], sp = s.sp?.[i] ?? 0;
-        if (fg.thumb) fg.pivots[0].rotation.set(-(s.tc ?? 0) * 1.1, 0, a.side * (-0.5 + c * 1.1 - sp)); // fecha em direção à palma
-        else {
-          fg.pivots[0].rotation.set(-c * 1.4, 0, -a.side * sp);
+        if (fg.thumb) {
+          fg.pivots[0].rotation.set(-(s.tc ?? 0) * 1.3, 0, -a.side * (-0.5 + c * 1.1 - sp)); // c fecha o polegar em direção à palma
+          fg.pivots[1].rotation.set(-(s.tb ?? 0) * 1.1, 0, 0);
+        } else {
+          fg.pivots[0].rotation.set(-c * 1.4, 0, a.side * sp);
           fg.pivots[1].rotation.x = -c * 1.2;
         }
       });

@@ -13,6 +13,7 @@ function blend(a, b, k) {
     o.f = a[key].f.map((v, i) => mix(v, b[key].f[i], k));
     o.sp = [0, 1, 2, 3, 4].map((i) => mix(a[key].sp?.[i] ?? 0, b[key].sp?.[i] ?? 0, k));
     o.tc = mix(a[key].tc ?? 0, b[key].tc ?? 0, k);
+    o.tb = mix(a[key].tb ?? 0, b[key].tb ?? 0, k);
     out[key] = o;
   }
   return out;
@@ -68,7 +69,7 @@ export function createAvatar(THREE, container) {
         if (track.i >= track.segs.length) { finish(); seg = null; break; }
         seg = track.segs[track.i]; startSegment(now);
       }
-      if (track && seg) cur = blend(seg.from, seg.to, ease(Math.min(1, (now - seg.t0) / (seg.dur * 1000))));
+      if (track && seg) { const kk = Math.min(1, (now - seg.t0) / (seg.dur * 1000)); cur = blend(seg.from, seg.to, seg.lin ? kk : ease(kk)); }
       rig.apply(cur);
     }
     rig.torso.scale.y = 1 + Math.sin(now / 900) * 0.008; // respiração sutil
@@ -97,7 +98,7 @@ export function createAvatar(THREE, container) {
         if (fr.word) lastWord = fr.word;
         const label = fr.spelled ? `${lastWord} · ${fr.spelled}` : fr.word;
         segs.push({
-          to: fr.pose, dur: fr.t,
+          to: fr.pose, dur: fr.t, lin: fr.lin,
           onStart: label ? () => onWord?.(label, fr) : undefined,
         });
         if (fr.h > 0) segs.push({ to: fr.pose, dur: fr.h });
