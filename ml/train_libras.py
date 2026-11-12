@@ -390,7 +390,7 @@ def export_tfjs(model, out_dir, quantize):
         "convertedBy": "train_libras.py",
         "modelTopology": json.loads(model.to_json()),
         "weightsManifest": [{"paths": paths, "weights": specs}],
-    }))
+    }), encoding="utf-8")
 
 
 def jsonable(a, nd=6):
@@ -536,7 +536,7 @@ def main():
     (out / "parity.json").write_text(json.dumps({
         "aspect": asp, "n": int(len(h)), "hands": jsonable(hr), "pose": jsonable(pr),
         "idx": [int(v) for v in i], "features": jsonable(feats), "embedding": jsonable(emb, 7),
-        "label": s0["label"]}))
+        "label": s0["label"]}), encoding="utf-8")
 
     # ---------- 5. relatório ----------
     sizes = {}
